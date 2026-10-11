@@ -36,8 +36,15 @@ st.markdown(f"""
 [data-testid="stSidebar"] {{background:#101A2B}}
 .block-container {{padding-top:1.5rem; max-width:1600px}}
 div[data-testid="stMetric"] {{background:{CARD}; padding:18px 20px; border-top:3px solid {CYAN}; border-radius:9px}}
-div[data-testid="stMetricLabel"] p {{color:{MUTED}}}
-h1,h2,h3 {{color:{TEXT}}}
+div[data-testid="stMetricLabel"] p {{color:{MUTED} !important}}
+div[data-testid="stMetricValue"] div {{color:{TEXT} !important}}
+div[data-testid="stMetricDelta"] {{color:{TEXT} !important}}
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] small {{color:{TEXT} !important}}
+[data-testid="stFileUploader"] {{background:#FFFFFF; border-radius:10px; padding:8px}}
+[data-testid="stSelectbox"] label, [data-testid="stMultiSelect"] label,
+[data-testid="stCheckbox"] label {{color:{TEXT} !important}}
+h1,h2,h3 {{color:{TEXT} !important}}
 .small-note {{color:{MUTED}; font-size:0.9rem}}
 </style>
 """, unsafe_allow_html=True)
@@ -60,6 +67,8 @@ EXPRESSWAYS = pd.DataFrame([
     ["Mumbai–Pune Expressway",2021,200,88],["Mumbai–Pune Expressway",2022,198,92],
     ["Mumbai–Pune Expressway",2023,154,65],["Mumbai–Pune Expressway",2024,191,90],
     ["Mumbai–Pune Expressway",2025,187,68],
+    ["Samruddhi Mahamarg",2022,21,1],["Samruddhi Mahamarg",2023,134,151],
+    ["Samruddhi Mahamarg",2024,137,126],["Samruddhi Mahamarg",2025,185,152],
 ], columns=["highway","year","accidents","deaths"])
 SOURCE_URL = "https://highwaypolice.maharashtra.gov.in/statics/"
 TRANSPORT_URL = "https://transport.maharashtra.gov.in/1297/Statistics"
@@ -151,11 +160,10 @@ if not ex.empty:
 st.dataframe(ex, use_container_width=True, hide_index=True)
 
 st.divider()
-st.subheader("District and highway analysis from your uploaded dataset")
+st.subheader("Official uploaded data explorer")
+st.caption("The uploader accepts official statewide aggregates, expressway summaries, or incident-level district/highway records. Each format is handled separately so aggregate rows are not miscounted as individual crashes.")
 if uploaded is None:
-    st.info("Upload a verified official accident-level CSV/XLSX to enable district and highway charts. "
-            "The public sources linked below provide statewide annual totals and some police-unit reports, "
-            "but they do not provide a complete, consistent accident-by-accident dataset for every district and every highway in one table.")
+    st.info("Upload one of the official CSV/XLSX formats to explore it here. The statewide and expressway charts above already use the published official figures.")
     st.markdown(f"""
 - [Official Highway Traffic Police annual statistics]({SOURCE_URL})
 - [Official Maharashtra Transport Department statistics]({TRANSPORT_URL})
@@ -167,45 +175,111 @@ else:
         st.write(f"Uploaded file: **{uploaded.name}** · {len(raw):,} rows · {len(raw.columns)} columns")
         st.dataframe(raw.head(10), use_container_width=True)
         if not user_confirms_official:
-            st.warning("Analysis is disabled until you confirm the file's provenance. If this is synthetic, generated, or demo data, leave the box unchecked.")
+            st.warning("Analysis is paused until you confirm the file is from an official source and is not synthetic/demo data.")
         else:
             df = raw.copy()
-            # Standardize common column labels while preserving original columns.
-            lower_to_original = {str(c).strip().lower().replace(" ","_"): c for c in df.columns}
+            # Normalize labels for flexible matching (spaces, punctuation, and case).
+            def norm_col(value):
+                import re
+                return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+            lower_to_original = {norm_col(c): c for c in df.columns}
             def find_col(*names):
                 for n in names:
-                    if n in lower_to_original: return lower_to_original[n]
+                    if n in lower_to_original:
+                        return lower_to_original[n]
                 return None
-            district_col = find_col("district","district_name","revenue_district")
-            highway_col = find_col("road_name","highway","highway_name","road","nh_name","route")
-            date_col = find_col("date","accident_date","crash_date")
-            year_col = find_col("year","accident_year")
-            deaths_col = find_col("fatalities","deaths","total_killed","persons_killed","killed")
-            injured_col = find_col("total_casualties","injured","total_injured","persons_injured")
+
+            year_col = find_col("year", "accident_year")
+            date_col = find_col("date", "accident_date", "crash_date")
+            district_col = find_col("district", "district_name", "revenue_district", "police_unit", "unit_name")
+            highway_col = find_col("road_name", "highway", "highway_name", "road", "nh_name", "route", "expressway")
+            accidents_col = find_col("total_accidents", "reported_accidents", "accidents", "number_of_accidents", "no_of_accident", "no_of_accidents", "total_accident", "total_no_of_accidents")
+            deaths_col = find_col("people_killed", "total_killed", "fatalities", "deaths", "persons_killed", "killed", "total_deaths", "total_killed_persons")
+            fatal_col = find_col("fatal_accidents", "fatal_accident", "number_fatal_accidents", "no_of_fatal_accidents", "fatal_accident_count")
+            serious_col = find_col("serious_injury_accidents", "serious_accidents", "seriously_injured_accidents", "serious_injury_accident", "no_of_serious_injury_accidents")
+            minor_col = find_col("minor_injury_accidents", "minor_accidents", "minor_injury_accident", "no_of_minor_injury_accidents")
+            noinjury_col = find_col("no_injury_accidents", "without_injury_accidents", "accidents_without_injury", "no_injury_accident")
+            injured_col = find_col("total_casualties", "injured", "total_injured", "persons_injured", "people_seriously_injured", "total_seriously_injured", "total_minor_injured")
+
             if year_col is None and date_col:
                 df["_parsed_date"] = pd.to_datetime(df[date_col], errors="coerce")
                 df["_year"] = df["_parsed_date"].dt.year
                 year_col = "_year"
-            if district_col is None and highway_col is None:
-                st.error("Could not find a district or highway column. Expected columns such as district, road_name/highway, year/date, fatalities/deaths, injured.")
-            else:
+
+            # Official statewide annual aggregate format (like the provided 2019–2025 CSV).
+            if year_col and accidents_col and (deaths_col or fatal_col) and (fatal_col or serious_col or minor_col or noinjury_col or accidents_col) and district_col is None and highway_col is None:
+                st.success("Detected official statewide annual aggregate data. Showing aggregate analysis (not incident-level district rankings).")
+                df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+                df[accidents_col] = pd.to_numeric(df[accidents_col], errors="coerce")
+                df[deaths_col] = pd.to_numeric(df[deaths_col], errors="coerce")
+                available_years = sorted(df[year_col].dropna().astype(int).unique().tolist())
+                selected_years = st.multiselect("Uploaded aggregate year filter", available_years, default=available_years, key="aggregate_year_filter")
+                aggdf = df[df[year_col].isin(selected_years)].copy()
+                m1,m2,m3 = st.columns(3)
+                m1.metric("Reported accidents in uploaded file", f"{aggdf[accidents_col].sum():,.0f}")
+                m2.metric("People killed in uploaded file", "Not available" if not deaths_col else f"{pd.to_numeric(aggdf[deaths_col], errors='coerce').fillna(0).sum():,.0f}")
+                m3.metric("Years included", f"{aggdf[year_col].nunique():,.0f}")
+                fig = px.line(aggdf, x=year_col, y=accidents_col, markers=True, title="Uploaded official annual accident trend")
+                fig.update_traces(line=dict(color=CYAN, width=4), marker=dict(size=9))
+                st.plotly_chart(chart_layout(fig), use_container_width=True)
+                impact_cols = [c for c in [fatal_col, serious_col, minor_col, noinjury_col] if c]
+                if impact_cols:
+                    sev = pd.DataFrame({"Severity": [str(c).replace("_", " ").title() for c in impact_cols],
+                                        "Accidents": [pd.to_numeric(aggdf[c], errors="coerce").fillna(0).sum() for c in impact_cols]})
+                    fig = px.bar(sev, x="Severity", y="Accidents", title="Uploaded accident categories", color="Severity",
+                                 color_discrete_sequence=[RED, AMBER, CYAN, PURPLE])
+                    st.plotly_chart(chart_layout(fig), use_container_width=True)
+                st.download_button("Download uploaded aggregate data", aggdf.to_csv(index=False).encode("utf-8"),
+                                   "filtered_official_aggregate.csv", "text/csv")
+                st.info("These figures are already aggregated by year. They cannot produce district or highway rankings unless those fields exist in the source data.")
+
+            # Official road/expressway aggregate format.
+            elif year_col and highway_col and accidents_col:
+                st.success("Detected road/highway summary data. Each row is treated as an aggregate, not as one accident.")
+                df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+                df[accidents_col] = pd.to_numeric(df[accidents_col], errors="coerce")
+                if deaths_col:
+                    df[deaths_col] = pd.to_numeric(df[deaths_col], errors="coerce")
+                available_years = sorted(df[year_col].dropna().astype(int).unique().tolist())
+                selected_years = st.multiselect("Uploaded road-data year filter", available_years, default=available_years, key="road_year_filter")
+                roads = sorted(df[highway_col].dropna().astype(str).unique().tolist())
+                selected_roads = st.multiselect("Road / highway filter", roads, default=roads, key="road_filter")
+                road_df = df[df[year_col].isin(selected_years) & df[highway_col].astype(str).isin(selected_roads)].copy()
+                m1,m2,m3 = st.columns(3)
+                m1.metric("Reported accidents", f"{road_df[accidents_col].sum():,.0f}")
+                m2.metric("People killed", "Not available" if not deaths_col else f"{road_df[deaths_col].sum():,.0f}")
+                m3.metric("Roads included", f"{road_df[highway_col].nunique():,.0f}")
+                fig = px.bar(road_df, x=year_col, y=accidents_col, color=highway_col, barmode="group", title="Accidents by road and year")
+                st.plotly_chart(chart_layout(fig), use_container_width=True)
+                if deaths_col:
+                    fig = px.line(road_df, x=year_col, y=deaths_col, color=highway_col, markers=True, title="Deaths by road and year")
+                    st.plotly_chart(chart_layout(fig), use_container_width=True)
+                st.dataframe(road_df, use_container_width=True, hide_index=True)
+                st.download_button("Download filtered road summary", road_df.to_csv(index=False).encode("utf-8"),
+                                   "filtered_official_road_summary.csv", "text/csv")
+
+            # Incident-level data with district and/or road labels.
+            elif district_col or highway_col:
+                st.success("Detected district/highway-labelled data. Review the source definition to confirm whether each row is one accident or an aggregate.")
                 if year_col:
                     df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
                     yr_vals = sorted(df[year_col].dropna().astype(int).unique().tolist())
-                    yr_filter = st.multiselect("Uploaded-data year filter", yr_vals, default=yr_vals)
+                    yr_filter = st.multiselect("Uploaded-data year filter", yr_vals, default=yr_vals, key="incident_year_filter")
                     df = df[df[year_col].isin(yr_filter)]
+                elif date_col:
+                    df["_parsed_date"] = pd.to_datetime(df[date_col], errors="coerce")
                 else:
                     st.warning("No year/date column detected; year filtering is unavailable.")
                 dcol, hcol = st.columns(2)
                 if district_col:
                     districts = sorted(df[district_col].dropna().astype(str).unique().tolist())
-                    chosen_d = dcol.multiselect("District", districts, default=districts)
+                    chosen_d = dcol.multiselect("District / police unit", districts, default=districts)
                     df = df[df[district_col].astype(str).isin(chosen_d)]
                 if highway_col:
                     highways = sorted(df[highway_col].dropna().astype(str).unique().tolist())
                     chosen_h = hcol.multiselect("Highway / road", highways, default=highways)
                     df = df[df[highway_col].astype(str).isin(chosen_h)]
-                count_col = find_col("accident_id","fir_number","case_id")
+                count_col = find_col("accident_id", "fir_number", "case_id")
                 n_acc = len(df) if count_col is None else df[count_col].nunique()
                 n_deaths = pd.to_numeric(df[deaths_col], errors="coerce").fillna(0).sum() if deaths_col else np.nan
                 n_injured = pd.to_numeric(df[injured_col], errors="coerce").fillna(0).sum() if injured_col else np.nan
@@ -215,20 +289,17 @@ else:
                 c.metric("Injuries (if supplied)", "Not available" if pd.isna(n_injured) else f"{n_injured:,.0f}")
                 if district_col:
                     agg = df.groupby(district_col, dropna=False).size().reset_index(name="records").sort_values("records",ascending=False)
-                    fig = px.bar(agg.head(36).sort_values("records"), x="records", y=district_col,
-                                 orientation="h", title="Records by district", color="records",
-                                 color_continuous_scale=["#164E63",CYAN,RED])
+                    fig = px.bar(agg.head(36).sort_values("records"), x="records", y=district_col, orientation="h",
+                                 title="Records by district / police unit", color="records", color_continuous_scale=["#164E63",CYAN,RED])
                     st.plotly_chart(chart_layout(fig, max(400, min(900, 22*len(agg)))), use_container_width=True)
                 if highway_col:
                     agg = df.groupby(highway_col, dropna=False).size().reset_index(name="records").sort_values("records",ascending=False)
-                    fig = px.bar(agg.head(25).sort_values("records"), x="records", y=highway_col,
-                                 orientation="h", title="Top 25 highways / roads by records",
-                                 color="records", color_continuous_scale=["#164E63",CYAN,AMBER])
+                    fig = px.bar(agg.head(25).sort_values("records"), x="records", y=highway_col, orientation="h",
+                                 title="Top 25 highways / roads by records", color="records", color_continuous_scale=["#164E63",CYAN,AMBER])
                     st.plotly_chart(chart_layout(fig, max(420, min(850, 25*min(len(agg),25)))), use_container_width=True)
                 if district_col and highway_col:
-                    pivot = pd.crosstab(df[district_col], df[highway_col])
                     st.markdown("**District × highway matrix**")
-                    st.dataframe(pivot, use_container_width=True)
+                    st.dataframe(pd.crosstab(df[district_col], df[highway_col]), use_container_width=True)
                 if date_col and deaths_col:
                     temp = df.copy()
                     temp["_date"] = pd.to_datetime(temp[date_col], errors="coerce")
@@ -240,6 +311,8 @@ else:
                     st.plotly_chart(chart_layout(fig), use_container_width=True)
                 st.download_button("Download filtered data as CSV", df.to_csv(index=False).encode("utf-8"),
                                    "filtered_maharashtra_road_accidents.csv", "text/csv")
+            else:
+                st.error("This file does not contain recognizable aggregate, road/highway, district, or incident-level columns. Check the column headers or download the official templates linked above.")
     except Exception as e:
         st.error(f"Could not read or analyse the uploaded file: {e}")
 
