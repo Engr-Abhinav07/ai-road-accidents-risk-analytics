@@ -217,13 +217,13 @@ else:
                     agg = df.groupby(district_col, dropna=False).size().reset_index(name="records").sort_values("records",ascending=False)
                     fig = px.bar(agg.head(36).sort_values("records"), x="records", y=district_col,
                                  orientation="h", title="Records by district", color="records",
-                                 color_continuous_scale=["#164E63",CY,RED])
+                                 color_continuous_scale=["#164E63",CYAN,RED])
                     st.plotly_chart(chart_layout(fig, max(400, min(900, 22*len(agg)))), use_container_width=True)
                 if highway_col:
                     agg = df.groupby(highway_col, dropna=False).size().reset_index(name="records").sort_values("records",ascending=False)
                     fig = px.bar(agg.head(25).sort_values("records"), x="records", y=highway_col,
                                  orientation="h", title="Top 25 highways / roads by records",
-                                 color="records", color_continuous_scale=["#164E63",CY,AMBER])
+                                 color="records", color_continuous_scale=["#164E63",CYAN,AMBER])
                     st.plotly_chart(chart_layout(fig, max(420, min(850, 25*min(len(agg),25)))), use_container_width=True)
                 if district_col and highway_col:
                     pivot = pd.crosstab(df[district_col], df[highway_col])
