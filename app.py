@@ -211,7 +211,8 @@ else:
                 st.success("Detected official statewide annual aggregate data. Showing aggregate analysis (not incident-level district rankings).")
                 df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
                 df[accidents_col] = pd.to_numeric(df[accidents_col], errors="coerce")
-                df[deaths_col] = pd.to_numeric(df[deaths_col], errors="coerce")
+                if deaths_col:
+                    df[deaths_col] = pd.to_numeric(df[deaths_col], errors="coerce")
                 available_years = sorted(df[year_col].dropna().astype(int).unique().tolist())
                 selected_years = st.multiselect("Uploaded aggregate year filter", available_years, default=available_years, key="aggregate_year_filter")
                 aggdf = df[df[year_col].isin(selected_years)].copy()
@@ -315,6 +316,333 @@ else:
                 st.error("This file does not contain recognizable aggregate, road/highway, district, or incident-level columns. Check the column headers or download the official templates linked above.")
     except Exception as e:
         st.error(f"Could not read or analyse the uploaded file: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Automatic visual analytics for ANY uploaded CSV/XLSX dataset.
+# This runs independently of the road-accident schema detector above.
+# ---------------------------------------------------------------------------
+if uploaded is not None:
+    st.divider()
+    st.subheader("✨ Automatic data visualization")
+    st.caption(
+        "Charts are selected from the columns found in your uploaded file. "
+        "These exploratory charts describe the uploaded data; they do not verify its source."
+    )
+    try:
+        file_bytes = uploaded.getvalue()
+        if uploaded.name.lower().endswith(".csv"):
+            # Try common encodings and let pandas infer the delimiter.
+            try:
+                auto_df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                auto_df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", encoding="latin-1")
+        else:
+            auto_df = pd.read_excel(io.BytesIO(file_bytes))
+
+        if auto_df.empty or len(auto_df.columns) == 0:
+            st.warning("The uploaded file has no data rows or columns to visualize.")
+        else:
+            import re
+
+            def _auto_norm(value):
+                return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+            # Convert object columns to numeric only when most non-empty values parse.
+            plot_df = auto_df.copy()
+            for col in plot_df.columns:
+                if not pd.api.types.is_numeric_dtype(plot_df[col]) and not pd.api.types.is_datetime64_any_dtype(plot_df[col]):
+                    non_null = plot_df[col].dropna()
+                    if len(non_null):
+                        converted = pd.to_numeric(
+                            non_null.astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False),
+                            errors="coerce"
+                        )
+                        if converted.notna().mean() >= 0.85:
+                            plot_df[col] = pd.to_numeric(
+                                plot_df[col].astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False),
+                                errors="coerce"
+                            )
+
+            # Detect date-like columns without blindly converting every text field.
+            date_cols = [c for c in plot_df.columns if pd.api.types.is_datetime64_any_dtype(plot_df[c])]
+            for col in plot_df.columns:
+                if col in date_cols or plot_df[col].dtype != "object":
+                    continue
+                name = _auto_norm(col)
+                if any(token in name for token in ("date", "time", "timestamp", "datetime")):
+                    parsed = pd.to_datetime(plot_df[col], errors="coerce")
+                    if parsed.notna().mean() >= 0.60:
+                        plot_df[col] = parsed
+                        date_cols.append(col)
+
+            # Global filters: expose every year and every district/police unit present
+            # in the uploaded data. These filters affect all automatic charts below.
+            year_candidates = [c for c in plot_df.columns if _auto_norm(c) in {
+                "year", "accident_year", "crash_year", "report_year", "calendar_year"
+            }]
+            year_filter_col = year_candidates[0] if year_candidates else None
+            if year_filter_col is None and date_cols:
+                year_filter_col = date_cols[0]
+
+            district_name_tokens = {
+                "district", "district_name", "districts", "revenue_district",
+                "police_unit", "unit_name", "city", "city_name", "town", "region", "state", "state_ut"
+            }
+            district_candidates = [c for c in plot_df.columns if _auto_norm(c) in district_name_tokens
+                                   or "district" in _auto_norm(c)]
+            district_filter_col = district_candidates[0] if district_candidates else None
+
+            filtered_df = plot_df.copy()
+            st.markdown("#### Dataset filters")
+            filter_cols = st.columns(2)
+            if year_filter_col is not None:
+                if year_filter_col in date_cols or pd.api.types.is_datetime64_any_dtype(filtered_df[year_filter_col]):
+                    years_available = sorted(pd.to_datetime(filtered_df[year_filter_col], errors="coerce").dt.year.dropna().astype(int).unique().tolist())
+                    chosen_years = filter_cols[0].multiselect(
+                        f"Select year(s) — {year_filter_col}", years_available,
+                        default=years_available, key="auto_all_year_filter"
+                    )
+                    date_years = pd.to_datetime(filtered_df[year_filter_col], errors="coerce").dt.year
+                    filtered_df = filtered_df[date_years.isin(chosen_years)]
+                else:
+                    numeric_years = pd.to_numeric(filtered_df[year_filter_col], errors="coerce")
+                    years_available = sorted(numeric_years.dropna().unique().tolist())
+                    chosen_years = filter_cols[0].multiselect(
+                        f"Select year(s) — {year_filter_col}", years_available,
+                        default=years_available, key="auto_all_year_filter"
+                    )
+                    filtered_df = filtered_df[numeric_years.isin(chosen_years)]
+            else:
+                filter_cols[0].caption("No year/date column detected; all rows are included.")
+
+            if district_filter_col is not None:
+                districts_available = sorted(filtered_df[district_filter_col].dropna().astype(str).unique().tolist())
+                chosen_districts = filter_cols[1].multiselect(
+                    f"Select district / location — {district_filter_col}",
+                    options=districts_available, default=districts_available,
+                    key="auto_all_district_filter", help="All values in this column are available; clear selections to inspect a subset."
+                )
+                filtered_df = filtered_df[filtered_df[district_filter_col].astype(str).isin(chosen_districts)]
+            else:
+                filter_cols[1].caption("No district/location column detected in this file.")
+
+            # Optional filter for any other categorical field, not only districts.
+            categorical_filter_candidates = [c for c in filtered_df.columns
+                if not pd.api.types.is_numeric_dtype(filtered_df[c])
+                and not pd.api.types.is_datetime64_any_dtype(filtered_df[c])
+                and 1 < filtered_df[c].nunique(dropna=True) <= 500]
+            if categorical_filter_candidates:
+                other_filter_col = st.selectbox(
+                    "Optional filter for any other category", ["(No extra filter)"] + categorical_filter_candidates,
+                    key="auto_extra_filter_column"
+                )
+                if other_filter_col != "(No extra filter)":
+                    extra_values = sorted(filtered_df[other_filter_col].dropna().astype(str).unique().tolist())
+                    selected_extra_values = st.multiselect(
+                        f"Select values — {other_filter_col}", extra_values,
+                        default=extra_values, key="auto_extra_filter_values"
+                    )
+                    filtered_df = filtered_df[filtered_df[other_filter_col].astype(str).isin(selected_extra_values)]
+
+            st.caption(f"Charts use {len(filtered_df):,} of {len(auto_df):,} uploaded rows after filtering.")
+            # All charts and column selectors below use the filtered data.
+            plot_df = filtered_df.copy()
+
+            numeric_cols_all = plot_df.select_dtypes(include=np.number).columns.tolist()
+            id_tokens = ("id", "index", "serial", "sr_no", "s_no", "phone", "mobile", "postal", "pincode", "zip")
+            numeric_cols = [
+                c for c in numeric_cols_all
+                if not any(token == part for token in id_tokens for part in _auto_norm(c).split("_"))
+                and plot_df[c].nunique(dropna=True) > 1
+            ]
+            categorical_cols = [
+                c for c in plot_df.columns
+                if c not in numeric_cols_all and c not in date_cols
+                and 1 < plot_df[c].nunique(dropna=True) <= min(100, max(20, int(len(plot_df) * 0.5)))
+            ]
+            # Low-cardinality numeric columns can also represent categories.
+            for c in numeric_cols_all:
+                if plot_df[c].nunique(dropna=True) <= 12 and c not in categorical_cols:
+                    categorical_cols.append(c)
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Rows", f"{len(auto_df):,}")
+            k2.metric("Columns", f"{len(auto_df.columns):,}")
+            k3.metric("Missing cells", f"{int(auto_df.isna().sum().sum()):,}")
+            k4.metric("Duplicate rows", f"{int(auto_df.duplicated().sum()):,}")
+
+            with st.expander("Detected data types and missing values"):
+                profile = pd.DataFrame({
+                    "Column": [str(c) for c in auto_df.columns],
+                    "Detected type": [str(plot_df[c].dtype) for c in auto_df.columns],
+                    "Missing values": [int(auto_df[c].isna().sum()) for c in auto_df.columns],
+                    "Unique values": [int(auto_df[c].nunique(dropna=True)) for c in auto_df.columns],
+                })
+                st.dataframe(profile, use_container_width=True, hide_index=True)
+
+            # Explicit full-column selector: make every source column available for exploration.
+            all_column_labels = [str(c) for c in plot_df.columns]
+            with st.expander("All available columns (for manual chart selection)", expanded=False):
+                st.multiselect(
+                    "Columns in this dataset", options=all_column_labels,
+                    default=all_column_labels, key="auto_all_columns_selector",
+                    help="Every uploaded column is listed here. Numeric, category and date selectors below are used to build compatible charts."
+                )
+
+            # Let users choose which numeric fields to focus on, without requiring it.
+            if numeric_cols:
+                chosen_numeric = st.multiselect(
+                    "Numeric columns to visualize",
+                    options=numeric_cols,
+                    default=numeric_cols[:min(6, len(numeric_cols))],
+                    key="auto_numeric_columns"
+                )
+            else:
+                chosen_numeric = []
+
+            if categorical_cols:
+                chosen_category = st.selectbox(
+                    "Category column (for comparisons)",
+                    options=categorical_cols,
+                    index=0,
+                    key="auto_category_column"
+                )
+            else:
+                chosen_category = None
+
+            if date_cols:
+                chosen_date = st.selectbox("Date/time column (for trends)", options=date_cols, key="auto_date_column")
+            else:
+                chosen_date = None
+
+            # Build a compact responsive chart grid.
+            if chosen_date and chosen_numeric:
+                trend_source = plot_df.dropna(subset=[chosen_date]).copy()
+                trend_source["_trend_period"] = trend_source[chosen_date]
+                if pd.api.types.is_datetime64_any_dtype(trend_source[chosen_date]):
+                    trend_source["_trend_period"] = trend_source[chosen_date].dt.to_period("M").astype(str)
+                    trend_source["_trend_period"] = pd.Categorical(
+                        trend_source["_trend_period"],
+                        categories=sorted(trend_source["_trend_period"].dropna().unique()),
+                        ordered=True
+                    )
+                trend_metric = st.selectbox(
+                    "Metric for trend chart",
+                    options=chosen_numeric,
+                    key="auto_trend_metric"
+                )
+                trend = trend_source.groupby("_trend_period", observed=False)[trend_metric].agg(["mean", "sum", "count"]).reset_index()
+                trend_stat = st.radio(
+                    "Trend aggregation",
+                    options=["Sum", "Average", "Count"],
+                    horizontal=True,
+                    key="auto_trend_aggregation"
+                )
+                stat_col = {"Sum": "sum", "Average": "mean", "Count": "count"}[trend_stat]
+                fig = px.line(
+                    trend, x="_trend_period", y=stat_col, markers=True,
+                    title=f"{trend_stat} of {trend_metric} over time",
+                    labels={"_trend_period": str(chosen_date), stat_col: trend_stat}
+                )
+                fig.update_traces(line=dict(color=CYAN, width=3))
+                st.plotly_chart(chart_layout(fig, 420), use_container_width=True)
+
+            if chosen_category:
+                cat_source = plot_df[[chosen_category] + chosen_numeric].copy() if chosen_numeric else plot_df[[chosen_category]].copy()
+                cat_source[chosen_category] = cat_source[chosen_category].astype("string").fillna("Missing")
+                cat_counts = cat_source[chosen_category].value_counts().head(20).sort_values()
+                c1, c2 = st.columns(2)
+                with c1:
+                    count_frame = cat_counts.rename_axis("Category").reset_index(name="Records")
+                    fig = px.bar(
+                        count_frame, x="Records", y="Category", orientation="h",
+                        title=f"Records by {chosen_category} (top 20)",
+                        color="Records", color_continuous_scale=["#164E63", CYAN, PURPLE]
+                    )
+                    st.plotly_chart(chart_layout(fig, max(380, min(700, 24 * len(count_frame)))), use_container_width=True)
+                with c2:
+                    pie_frame = cat_source[chosen_category].value_counts().head(8).rename_axis("Category").reset_index(name="Records")
+                    if len(pie_frame) >= 2:
+                        fig = px.pie(pie_frame, names="Category", values="Records", hole=0.55,
+                                     title=f"Category share: {chosen_category}")
+                        st.plotly_chart(chart_layout(fig, 390), use_container_width=True)
+
+                if chosen_numeric:
+                    cat_metric = st.selectbox(
+                        "Numeric metric for category comparison",
+                        options=chosen_numeric,
+                        key="auto_category_metric"
+                    )
+                    compare = plot_df[[chosen_category, cat_metric]].copy()
+                    compare[chosen_category] = compare[chosen_category].astype("string").fillna("Missing")
+                    compare = compare.groupby(chosen_category, dropna=False)[cat_metric].mean().nlargest(20).sort_values().reset_index()
+                    fig = px.bar(
+                        compare, x=cat_metric, y=chosen_category, orientation="h",
+                        title=f"Average {cat_metric} by {chosen_category} (top 20)",
+                        color=cat_metric, color_continuous_scale=["#164E63", CYAN, AMBER]
+                    )
+                    st.plotly_chart(chart_layout(fig, max(390, min(720, 26 * len(compare)))), use_container_width=True)
+
+            if chosen_numeric:
+                st.markdown("#### Numeric distributions")
+                distribution_cols = st.columns(2)
+                for idx, col in enumerate(chosen_numeric[:6]):
+                    with distribution_cols[idx % 2]:
+                        values = plot_df[col].replace([np.inf, -np.inf], np.nan).dropna()
+                        if values.empty:
+                            st.info(f"No usable numeric values in {col}.")
+                            continue
+                        fig = px.histogram(
+                            pd.DataFrame({col: values}), x=col, nbins=30,
+                            title=f"Distribution of {col}", marginal="box"
+                        )
+                        fig.update_traces(marker_line_width=0.5)
+                        st.plotly_chart(chart_layout(fig, 350), use_container_width=True)
+
+                if len(chosen_numeric) >= 2:
+                    scatter_x = st.selectbox("Scatter plot — X axis", chosen_numeric, index=0, key="auto_scatter_x")
+                    scatter_y = st.selectbox("Scatter plot — Y axis", chosen_numeric, index=1, key="auto_scatter_y")
+                    scatter_df = plot_df[[scatter_x, scatter_y] + ([chosen_category] if chosen_category else [])].dropna().head(10000)
+                    fig = px.scatter(
+                        scatter_df, x=scatter_x, y=scatter_y,
+                        color=chosen_category if chosen_category and chosen_category != scatter_x and chosen_category != scatter_y else None,
+                        opacity=0.7, title=f"{scatter_y} vs {scatter_x}"
+                    )
+                    st.plotly_chart(chart_layout(fig, 430), use_container_width=True)
+
+                if len(chosen_numeric) >= 2:
+                    corr = plot_df[chosen_numeric].corr(numeric_only=True)
+                    fig = px.imshow(
+                        corr, text_auto=".2f", aspect="auto",
+                        color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
+                        title="Correlation heatmap"
+                    )
+                    st.plotly_chart(chart_layout(fig, 430), use_container_width=True)
+
+                if chosen_category and chosen_numeric:
+                    box_metric = st.selectbox("Box plot metric", chosen_numeric, key="auto_box_metric")
+                    box_data = plot_df[[chosen_category, box_metric]].dropna().copy()
+                    box_data[chosen_category] = box_data[chosen_category].astype(str)
+                    top_categories = box_data[chosen_category].value_counts().head(12).index
+                    box_data = box_data[box_data[chosen_category].isin(top_categories)]
+                    fig = px.box(box_data, x=chosen_category, y=box_metric, points="outliers",
+                                 title=f"{box_metric} spread by {chosen_category} (top 12 categories)")
+                    st.plotly_chart(chart_layout(fig, 430), use_container_width=True)
+
+            if not numeric_cols and not categorical_cols and not date_cols:
+                st.info("This file has no columns suitable for automatic charts. Review the detected data types above.")
+            elif not chosen_numeric and not chosen_category and not chosen_date:
+                st.info("Choose one or more columns above to generate charts.")
+            st.download_button(
+                "Download uploaded dataset as CSV",
+                auto_df.to_csv(index=False).encode("utf-8"),
+                file_name="uploaded_dataset.csv",
+                mime="text/csv",
+                key="auto_download_dataset"
+            )
+    except Exception as auto_error:
+        st.error(f"Automatic visualization could not process this file: {auto_error}")
 
 st.divider()
 st.subheader("Data integrity & limitations")
